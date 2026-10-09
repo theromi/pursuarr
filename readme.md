@@ -11,7 +11,27 @@ A better search interface connecting directly to Prowlarr, working on top of its
 - Nearly stateless: No database, only a single settings file containing the API key and base URL to Prowlarr and the expanded search keywords.
 - Single PHP-File: No external dependencies, just drop into your web server and run.
 
-## Docker
+## Install from GHCR
+
+Images for `linux/amd64` and `linux/arm64` are built automatically on every push to `main`:
+
+```sh
+docker run -d -p 8080:8080 -v pursuarr-data:/data ghcr.io/theromi/pursuarr:latest
+```
+
+### Unraid
+
+1. Copy `unraid-template.xml` to `/boot/config/plugins/dockerMan/templates/mytemplates/pursuarr.xml` on your Unraid server (e.g. via SCP or the CA "User Templates" share).
+2. Docker → **Add Container** → pick **pursuarr** from the *Template* dropdown → **Apply**.
+3. Fix permissions once so settings can be saved (the container runs as a non-root user):
+   ```sh
+   docker exec pursuarr id   # note uid:gid, e.g. 100:100
+   chown -R 100:100 /mnt/user/appdata/pursuarr
+   ```
+
+If the GHCR package is private, run `docker login ghcr.io -u <user>` on Unraid first — or make the package public under the package's *Settings → Change visibility*.
+
+## Build from source
 
 ```sh
 docker build -t pursuarr .

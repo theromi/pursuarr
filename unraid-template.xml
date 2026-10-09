@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>pursuarr</Name>
+  <Repository>ghcr.io/theromi/pursuarr:latest</Repository>
+  <Registry>https://ghcr.io/v2</Registry>
+  <Network>bridge</Network>
+  <MyIP></MyIP>
+  <Shell></Shell>
+  <Support>https://github.com/theromi/pursuarr/issues</Support>
+  <Project>https://github.com/theromi/pursuarr</Project>
+  <Overview>Pursuarr - a better search interface for Prowlarr, working on top of its API. There is no login: keep it on a private network or behind a reverse proxy with auth.</Overview>
+  <Category>Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/theromi/pursuarr/main/unraid-template.xml</TemplateURL>
+  <Icon></Icon>
+  <ExtraParams></ExtraParams>
+  <PostArgs></PostArgs>
+  <CPUset></CPUset>
+  <DateInstalled></DateInstalled>
+  <Donate></Donate>
+  <Config Name="Web UI Port" Target="8080" Default="8080" Description="Port for the Pursuarr web UI" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/pursuarr" Description="Folder where Pursuarr stores settings.php" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/pursuarr</Config>
+  <Config Name="PURSUARR_SETTINGS" Target="PURSUARR_SETTINGS" Default="/data/settings.php" Description="Location of the settings file inside the container" Type="Variable" Display="always" Required="false" Mask="false">/data/settings.php</Config>
+  <Config Name="PHP_CLI_SERVER_WORKERS" Target="PHP_CLI_SERVER_WORKERS" Default="4" Description="Number of PHP workers" Type="Variable" Display="advanced-hide" Required="false" Mask="false">4</Config>
+</Container>
