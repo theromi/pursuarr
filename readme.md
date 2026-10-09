@@ -29,8 +29,6 @@ docker run -d -p 8080:8080 -v pursuarr-data:/data ghcr.io/theromi/pursuarr:lates
    chown -R 100:100 /mnt/user/appdata/pursuarr
    ```
 
-If the GHCR package is private, run `docker login ghcr.io -u <user>` on Unraid first — or make the package public under the package's *Settings → Change visibility*.
-
 ## Build from source
 
 ```sh
