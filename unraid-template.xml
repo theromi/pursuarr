@@ -21,5 +21,5 @@
   <Config Name="Web UI Port" Target="8080" Default="8080" Description="Port for the Pursuarr web UI" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
   <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/pursuarr" Description="Folder where Pursuarr stores settings.php" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/pursuarr</Config>
   <Config Name="PURSUARR_SETTINGS" Target="PURSUARR_SETTINGS" Default="/data/settings.php" Description="Location of the settings file inside the container" Type="Variable" Display="always" Required="false" Mask="false">/data/settings.php</Config>
-  <Config Name="PHP_CLI_SERVER_WORKERS" Target="PHP_CLI_SERVER_WORKERS" Default="4" Description="Number of PHP workers" Type="Variable" Display="advanced-hide" Required="false" Mask="false">4</Config>
+  <Config Name="PHP_CLI_SERVER_WORKERS" Target="PHP_CLI_SERVER_WORKERS" Default="8" Description="Number of PHP workers" Type="Variable" Display="advanced-hide" Required="false" Mask="false">8</Config>
 </Container>

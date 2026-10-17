@@ -7,9 +7,9 @@
  * SECURITY: There is NO application authentication by design. Anyone who can reach
  * this app can search, grab releases and edit settings (including the Prowlarr URL
  * and API key). Protect this path — ideally the whole vhost — at your reverse proxy
- * (basic auth, VPN, tailscale, IP allowlist ...). The Prowlarr API key never reaches
- * the browser; it lives only in settings.php (chmod 0600, kept outside the docroot
- * when possible, else denied via .htaccess).
+ * (basic auth, VPN, tailscale, IP allowlist ...). Once saved, the Prowlarr API key is
+ * never rendered back into the browser HTML; it lives only in settings.php (chmod 0600,
+ * kept outside the docroot when possible, else denied via .htaccess).
  */
 declare(strict_types=1);
 
@@ -32,20 +32,73 @@ function pursuarr_json($data, int $code = 200): void
 
 /* ---------------------------------------------------------------- config --- */
 
+function pursuarr_env(string ...$names): ?string
+{
+    foreach ($names as $name) {
+        $val = getenv($name);
+        if (is_string($val) && trim($val) !== '') {
+            return trim($val);
+        }
+    }
+    return null;
+}
+
+function pursuarr_groups_to_text(array $groups): string
+{
+    $lines = [];
+    foreach ($groups as $g) {
+        $lines[] = implode(' | ', $g);
+    }
+    return implode("\n", $lines);
+}
+
+function pursuarr_parse_groups_text(string $text): array
+{
+    $groups = [];
+    foreach (preg_split('/(?:\R|;)+/', $text) ?: [] as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        $members = [];
+        foreach (explode('|', $line) as $part) {
+            $part = trim($part);
+            if ($part !== '' && !in_array($part, $members, true)) {
+                $members[] = $part;
+            }
+        }
+        if (count($members) > 0) {
+            $groups[] = $members;
+        }
+    }
+    return $groups;
+}
+
 function pursuarr_default_settings(): array
 {
+    $envUrl = pursuarr_env('PROWLARR_URL', 'PURSUARR_PROWLARR_URL');
+    $envKey = pursuarr_env('PROWLARR_API_KEY', 'PURSUARR_PROWLARR_API_KEY');
+    $envGroups = pursuarr_env('PURSUARR_EXPANSION_GROUPS');
+    $envVariants = pursuarr_env('PURSUARR_MAX_SEARCH_VARIANTS');
+    $envLimit = pursuarr_env('PURSUARR_DEFAULT_LIMIT');
+    $envTimeout = pursuarr_env('PURSUARR_SEARCH_TIMEOUT');
+    $envClient = pursuarr_env('PURSUARR_DOWNLOAD_CLIENT_ID');
+    $envTls = pursuarr_env('PURSUARR_VERIFY_TLS');
+
     return [
-        'prowlarr_url' => 'http://localhost:9696',
-        'prowlarr_api_key' => '',
-        'expansion_groups' => [
-            ['x265', 'h265', 'HEVC'],
-            ['x264', 'h264', 'AVC'],
-        ],
-        'max_search_variants' => 5,
-        'default_limit' => 100,
-        'search_timeout' => 90,
-        'download_client_id' => null,
-        'verify_tls' => true,
+        'prowlarr_url' => $envUrl ?? 'http://localhost:9696',
+        'prowlarr_api_key' => $envKey ?? '',
+        'expansion_groups' => $envGroups !== null
+            ? pursuarr_parse_groups_text($envGroups)
+            : [
+                ['x265', 'h265', 'HEVC'],
+                ['x264', 'h264', 'AVC'],
+            ],
+        'max_search_variants' => $envVariants !== null ? (int)$envVariants : 5,
+        'default_limit' => $envLimit !== null ? (int)$envLimit : 100,
+        'search_timeout' => $envTimeout !== null ? (int)$envTimeout : 90,
+        'download_client_id' => $envClient !== null ? (is_numeric($envClient) ? (int)$envClient : $envClient) : null,
+        'verify_tls' => $envTls !== null ? !in_array(strtolower($envTls), ['0', 'false', 'off', 'no'], true) : true,
     ];
 }
 
@@ -103,10 +156,14 @@ function pursuarr_normalize_settings(array $raw): array
     return $s;
 }
 
-function pursuarr_load_settings(): ?array
+function pursuarr_load_settings(bool $reload = false): ?array
 {
     static $cached = false;
     static $value = null;
+    if ($reload) {
+        $cached = false;
+        $value = null;
+    }
     if ($cached) {
         return $value;
     }
@@ -120,7 +177,31 @@ function pursuarr_load_settings(): ?array
             }
         }
     }
+    $envUrl = pursuarr_env('PROWLARR_URL', 'PURSUARR_PROWLARR_URL');
+    $envKey = pursuarr_env('PROWLARR_API_KEY', 'PURSUARR_PROWLARR_API_KEY');
+    if ($envUrl !== null && $envKey !== null) {
+        $value = pursuarr_normalize_settings(pursuarr_default_settings());
+        return $value;
+    }
     return null;
+}
+
+function pursuarr_csrf_token(?array $settings = null): string
+{
+    $s = $settings ?? pursuarr_load_settings();
+    $secret = $s !== null
+        ? ('configured|' . $s['prowlarr_url'] . '|' . $s['prowlarr_api_key'] . '|' . __FILE__)
+        : ('setup|' . __FILE__ . '|' . (string)@filemtime(__FILE__));
+    return hash_hmac('sha256', 'pursuarr-csrf-v1', $secret);
+}
+
+function pursuarr_is_same_origin_request(): bool
+{
+    $secFetch = strtolower(trim((string)($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    if ($secFetch !== '' && !in_array($secFetch, ['same-origin', 'none'], true)) {
+        return false;
+    }
+    return true;
 }
 
 function pursuarr_write_settings(array $settings): array
@@ -135,16 +216,28 @@ function pursuarr_write_settings(array $settings): array
         if (is_file($path) && !is_writable($path)) {
             continue;
         }
-        if (@file_put_contents($path, $php) === false) {
+        try {
+            $suffix = bin2hex(random_bytes(4));
+        } catch (Throwable) {
+            $suffix = (string)mt_rand(100000, 999999);
+        }
+        $tmp = $path . '.tmp.' . getmypid() . '.' . $suffix;
+        if (@file_put_contents($tmp, $php, LOCK_EX) === false) {
+            @unlink($tmp);
             continue;
         }
-        @chmod($path, 0600);
+        @chmod($tmp, 0600);
+        if (!@rename($tmp, $path)) {
+            @unlink($tmp);
+            continue;
+        }
         if (function_exists('opcache_invalidate')) {
             @opcache_invalidate($path, true);
         }
         if (realpath($dir) === realpath(__DIR__)) {
             pursuarr_write_htaccess($dir);
         }
+        pursuarr_load_settings(true);
         return ['ok' => true, 'path' => $path, 'error' => null];
     }
     return [
@@ -171,6 +264,9 @@ function pursuarr_write_htaccess(string $dir): void
 
 function pursuarr_settings_exposed_url(string $path): ?string
 {
+    if (PHP_SAPI === 'cli-server' && (int)getenv('PHP_CLI_SERVER_WORKERS') <= 1) {
+        return null;
+    }
     $docroot = (string)($_SERVER['DOCUMENT_ROOT'] ?? '');
     if ($docroot === '') {
         return null;
@@ -189,6 +285,9 @@ function pursuarr_settings_exposed_url(string $path): ?string
         || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
     $scheme = $https ? 'https' : 'http';
     $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    if (!preg_match('/^[a-zA-Z0-9.\-\[\]:]+$/', $host)) {
+        return null;
+    }
     $url = $scheme . '://' . $host . '/' . str_replace(' ', '%20', $rel);
 
     $ch = curl_init($url);
@@ -197,10 +296,12 @@ function pursuarr_settings_exposed_url(string $path): ?string
     }
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 5,
-        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 2,
+        CURLOPT_CONNECTTIMEOUT => 1,
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_FOLLOWLOCATION => false,
     ]);
     $body = curl_exec($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -609,9 +710,15 @@ function pursuarr_post_filter(array $results, array $tokens): array
         if ($t['type'] === 'exclude') {
             $exclusions[] = mb_strtolower((string)$t['text'], 'UTF-8');
         } elseif ($t['type'] === 'exact') {
-            $exacts[] = pursuarr_normalize_title_tokens((string)$t['text']);
+            $norm = pursuarr_normalize_title_tokens((string)$t['text']);
+            if ($norm !== []) {
+                $exacts[] = $norm;
+            }
         } elseif ($t['type'] === 'exact_exclude') {
-            $exactExclusions[] = pursuarr_normalize_title_tokens((string)$t['text']);
+            $norm = pursuarr_normalize_title_tokens((string)$t['text']);
+            if ($norm !== []) {
+                $exactExclusions[] = $norm;
+            }
         }
     }
     $out = [];
@@ -687,44 +794,23 @@ function pursuarr_valid_type($type): string
 
 /* ------------------------------------------------------------- settings UI --- */
 
-function pursuarr_groups_to_text(array $groups): string
-{
-    $lines = [];
-    foreach ($groups as $g) {
-        $lines[] = implode(' | ', $g);
-    }
-    return implode("\n", $lines);
-}
-
-function pursuarr_parse_groups_text(string $text): array
-{
-    $groups = [];
-    foreach (preg_split('/\R/', $text) as $line) {
-        $line = trim($line);
-        if ($line === '') {
-            continue;
-        }
-        $members = [];
-        foreach (explode('|', $line) as $part) {
-            $part = trim($part);
-            if ($part !== '' && !in_array($part, $members, true)) {
-                $members[] = $part;
-            }
-        }
-        if (count($members) > 0) {
-            $groups[] = $members;
-        }
-    }
-    return $groups;
-}
-
 function pursuarr_handle_settings_post(): void
 {
-    $current = pursuarr_load_settings() ?? pursuarr_default_settings();
+    $persisted = pursuarr_load_settings();
+    $current = $persisted ?? pursuarr_default_settings();
+    $isSetup = $persisted === null;
+
+    if (!pursuarr_is_same_origin_request() || !hash_equals(pursuarr_csrf_token($persisted), (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        pursuarr_render_settings($current, $isSetup, null, 'Invalid or expired form submission — reload the page and try again.');
+        return;
+    }
+
     $verifyTls = isset($_POST['verify_tls']) && $_POST['verify_tls'] !== '' && $_POST['verify_tls'] !== '0';
+    $submittedKey = trim((string)($_POST['prowlarr_api_key'] ?? ''));
     $candidate = pursuarr_normalize_settings([
         'prowlarr_url' => (string)($_POST['prowlarr_url'] ?? ''),
-        'prowlarr_api_key' => (string)($_POST['prowlarr_api_key'] ?? ''),
+        'prowlarr_api_key' => $submittedKey,
         'expansion_groups' => pursuarr_parse_groups_text((string)($_POST['expansion_groups'] ?? '')),
         'max_search_variants' => (int)($_POST['max_search_variants'] ?? $current['max_search_variants']),
         'default_limit' => (int)($_POST['default_limit'] ?? $current['default_limit']),
@@ -734,19 +820,28 @@ function pursuarr_handle_settings_post(): void
     ]);
 
     if ($candidate['prowlarr_url'] === '' || preg_match('#^https?://$#i', $candidate['prowlarr_url'])) {
-        pursuarr_render_settings($current, pursuarr_load_settings() === null, null, 'Prowlarr base URL is required.');
+        pursuarr_render_settings($candidate, $isSetup, null, 'Prowlarr base URL is required.');
         return;
+    }
+
+    if ($candidate['prowlarr_api_key'] === '' && $persisted !== null && $persisted['prowlarr_api_key'] !== '') {
+        if (strcasecmp($candidate['prowlarr_url'], $persisted['prowlarr_url']) === 0) {
+            $candidate['prowlarr_api_key'] = $persisted['prowlarr_api_key'];
+        } else {
+            pursuarr_render_settings($candidate, $isSetup, null, 'Please re-enter the Prowlarr API key when changing the Prowlarr base URL.');
+            return;
+        }
     }
 
     $test = pursuarr_request_json('GET', '/system/status', $candidate, null, null, 20);
     if (!$test['ok']) {
-        pursuarr_render_settings($current, pursuarr_load_settings() === null, null, 'Connection test failed — settings not saved. ' . $test['error']);
+        pursuarr_render_settings($candidate, $isSetup, null, 'Connection test failed — settings not saved. ' . $test['error']);
         return;
     }
 
     $written = pursuarr_write_settings($candidate);
     if (!$written['ok']) {
-        pursuarr_render_settings($current, pursuarr_load_settings() === null, null, $written['error']);
+        pursuarr_render_settings($candidate, $isSetup, null, $written['error']);
         return;
     }
 
@@ -762,6 +857,11 @@ function pursuarr_handle_settings_post(): void
 
 function pursuarr_main(): void
 {
+    $action = (string)($_GET['action'] ?? '');
+    if ($action === 'health') {
+        pursuarr_json(['ok' => true]);
+    }
+
     if (!function_exists('curl_init')) {
         pursuarr_render_fatal(
             'The PHP cURL extension is required but not loaded. Install/enable it '
@@ -770,7 +870,6 @@ function pursuarr_main(): void
         );
     }
 
-    $action = (string)($_GET['action'] ?? '');
     $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     $settings = pursuarr_load_settings();
 
@@ -863,7 +962,8 @@ function pursuarr_action_search(array $settings): void
 
     $perVariant = pursuarr_search_multi($variants, $common, $settings);
 
-    $results = [];
+    $variantLists = [];
+    $maxLen = 0;
     $errors = [];
     $used = [];
     foreach ($perVariant as $entry) {
@@ -872,14 +972,23 @@ function pursuarr_action_search(array $settings): void
             $errors[] = ['variant' => $entry['query'], 'error' => $entry['error']];
             continue;
         }
-        foreach ($entry['results'] as $r) {
-            if (is_array($r)) {
-                $results[] = $r;
+        $list = array_values(array_filter($entry['results'], 'is_array'));
+        $variantLists[] = $list;
+        if (count($list) > $maxLen) {
+            $maxLen = count($list);
+        }
+    }
+
+    $results = [];
+    for ($idx = 0; $idx < $maxLen; $idx++) {
+        foreach ($variantLists as $list) {
+            if (isset($list[$idx])) {
+                $results[] = $list[$idx];
             }
         }
     }
 
-    $results = pursuarr_post_filter(pursuarr_dedupe($results), $tokens);
+    $results = array_slice(pursuarr_post_filter(pursuarr_dedupe($results), $tokens), 0, $limit);
 
     pursuarr_json([
         'results' => $results,
@@ -892,6 +1001,9 @@ function pursuarr_action_grab(array $settings): void
 {
     if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST') {
         pursuarr_json(['ok' => false, 'error' => 'Use POST with a JSON body {guid, indexerId}.'], 405);
+    }
+    if (!pursuarr_is_same_origin_request()) {
+        pursuarr_json(['ok' => false, 'error' => 'Cross-origin requests are not allowed.'], 403);
     }
 
     $raw = (string)file_get_contents('php://input');
@@ -951,7 +1063,7 @@ function pursuarr_action_indexers(array $settings): void
 
 function pursuarr_action_categories(array $settings): void
 {
-    $res = pursuarr_request_json('GET', '/categories', $settings, null, null, 20);
+    $res = pursuarr_request_json('GET', '/indexer/categories', $settings, null, null, 20);
     if (!$res['ok'] || !is_array($res['json'])) {
         pursuarr_json([]);
     }
@@ -977,16 +1089,44 @@ function pursuarr_action_categories(array $settings): void
 
 function pursuarr_action_status(array $settings): void
 {
-    $url = $_GET['url'] ?? $_POST['url'] ?? null;
-    $key = $_GET['key'] ?? $_POST['key'] ?? null;
-    $verifyTls = $_GET['verify_tls'] ?? $_POST['verify_tls'] ?? null;
+    $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    if (isset($_GET['url']) || isset($_GET['key']) || isset($_GET['verify_tls'])) {
+        pursuarr_json(['ok' => false, 'error' => 'Use POST with a JSON body to test custom connection parameters.'], 405);
+    }
 
-    if ($url !== null || $key !== null) {
-        $settings = pursuarr_normalize_settings([
-            'prowlarr_url' => (string)($url ?? $settings['prowlarr_url']),
-            'prowlarr_api_key' => (string)($key ?? $settings['prowlarr_api_key']),
-            'verify_tls' => $verifyTls === null ? $settings['verify_tls'] : !in_array((string)$verifyTls, ['0', 'false', 'off'], true),
-        ]);
+    if ($method === 'POST') {
+        if (!pursuarr_is_same_origin_request()) {
+            pursuarr_json(['ok' => false, 'error' => 'Cross-origin requests are not allowed.'], 403);
+        }
+        $raw = (string)file_get_contents('php://input');
+        $body = json_decode($raw, true);
+        if (!is_array($body)) {
+            $body = $_POST;
+        }
+        $persisted = pursuarr_load_settings();
+        if (!hash_equals(pursuarr_csrf_token($persisted), (string)($body['csrf_token'] ?? ''))) {
+            pursuarr_json(['ok' => false, 'error' => 'Invalid or expired form token — reload the page and try again.'], 403);
+        }
+
+        $url = isset($body['url']) ? (string)$body['url'] : null;
+        $key = isset($body['key']) ? trim((string)$body['key']) : null;
+        $verifyTls = $body['verify_tls'] ?? null;
+
+        if ($url !== null || $key !== null || $verifyTls !== null) {
+            $candidate = pursuarr_normalize_settings([
+                'prowlarr_url' => $url ?? $settings['prowlarr_url'],
+                'prowlarr_api_key' => $key ?? '',
+                'verify_tls' => $verifyTls === null ? $settings['verify_tls'] : !in_array((string)$verifyTls, ['0', 'false', 'off'], true),
+            ]);
+            if ($candidate['prowlarr_api_key'] === '' && $settings['prowlarr_api_key'] !== '') {
+                if (strcasecmp($candidate['prowlarr_url'], $settings['prowlarr_url']) === 0) {
+                    $candidate['prowlarr_api_key'] = $settings['prowlarr_api_key'];
+                } else {
+                    pursuarr_json(['ok' => false, 'error' => 'Please enter the Prowlarr API key to test a new base URL.', 'url' => $candidate['prowlarr_url']]);
+                }
+            }
+            $settings = $candidate;
+        }
     }
 
     $res = pursuarr_request_json('GET', '/system/status', $settings, null, null, 20);
@@ -1039,6 +1179,12 @@ function pursuarr_render_fatal(string $message): void
 function pursuarr_render_settings(?array $settings, bool $isSetup, ?string $notice, ?string $error): void
 {
     $s = $settings ?? pursuarr_default_settings();
+    $persisted = pursuarr_load_settings();
+    $csrfToken = pursuarr_csrf_token($persisted);
+    $hasSavedKey = ($persisted['prowlarr_api_key'] ?? '') !== '';
+    $keyPlaceholder = $hasSavedKey
+        ? '•••••••• (saved — leave blank to keep current key)'
+        : 'Settings → General → Security → API Key';
     $title = $isSetup ? 'Pursuarr — Setup' : 'Pursuarr — Settings';
     $heading = $isSetup ? 'Setup' : 'Settings';
     $submitLabel = $isSetup ? 'Save & connect' : 'Save settings';
@@ -1059,7 +1205,7 @@ h1{font-size:22px;margin:0 0 4px}
 .sub{color:var(--muted);margin:0 0 24px}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:22px}
 label{display:block;font-size:13px;color:var(--muted);margin:16px 0 6px}
-input[type=text],input[type=number],textarea{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
+input[type=text],input[type=password],input[type=number],textarea{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
 textarea{min-height:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
 input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
 .row{display:flex;gap:14px;flex-wrap:wrap}
@@ -1092,13 +1238,14 @@ a{color:var(--accent)}
   <?php endif; ?>
 
   <form class="card" method="post" action="?action=settings">
+    <input type="hidden" id="csrf_token" name="csrf_token" value="<?= pursuarr_h($csrfToken) ?>">
     <h2 style="margin:0;font-size:16px"><?= pursuarr_h($heading) ?></h2>
 
     <label for="prowlarr_url">Prowlarr base URL</label>
     <input type="text" id="prowlarr_url" name="prowlarr_url" value="<?= pursuarr_h($s['prowlarr_url']) ?>" placeholder="http://localhost:9696" required>
 
     <label for="prowlarr_api_key">Prowlarr API key</label>
-    <input type="text" id="prowlarr_api_key" name="prowlarr_api_key" value="<?= pursuarr_h($s['prowlarr_api_key']) ?>" placeholder="Settings → General → Security → API Key" autocomplete="off">
+    <input type="password" id="prowlarr_api_key" name="prowlarr_api_key" value="" placeholder="<?= pursuarr_h($keyPlaceholder) ?>" autocomplete="new-password">
 
     <label for="expansion_groups">Expand search groups <span style="opacity:.7">(one group per line, terms separated by <code>|</code>)</span></label>
     <textarea id="expansion_groups" name="expansion_groups" placeholder="x265 | h265 | HEVC"><?= $groupsText ?></textarea>
@@ -1142,14 +1289,19 @@ a{color:var(--accent)}
   var btn = document.getElementById('testBtn');
   var out = document.getElementById('testResult');
   btn.addEventListener('click', function(){
-    var params = new URLSearchParams();
-    params.set('action', 'status');
-    params.set('url', document.getElementById('prowlarr_url').value.trim());
-    params.set('key', document.getElementById('prowlarr_api_key').value.trim());
-    params.set('verify_tls', document.getElementById('verify_tls').checked ? '1' : '0');
+    var payload = {
+      url: document.getElementById('prowlarr_url').value.trim(),
+      key: document.getElementById('prowlarr_api_key').value.trim(),
+      verify_tls: document.getElementById('verify_tls').checked ? '1' : '0',
+      csrf_token: document.getElementById('csrf_token').value
+    };
     out.textContent = 'Testing…';
     out.style.color = 'var(--muted)';
-    fetch('?' + params.toString())
+    fetch('?action=status', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    })
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (d.ok) {

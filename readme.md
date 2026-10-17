@@ -23,11 +23,7 @@ docker run -d -p 8080:8080 -v pursuarr-data:/data ghcr.io/theromi/pursuarr:lates
 
 1. Copy `unraid-template.xml` to `/boot/config/plugins/dockerMan/templates/mytemplates/pursuarr.xml` on your Unraid server (e.g. via SCP or the CA "User Templates" share).
 2. Docker → **Add Container** → pick **pursuarr** from the *Template* dropdown → **Apply**.
-3. Fix permissions once so settings can be saved (the container runs as a non-root user):
-   ```sh
-   docker exec pursuarr id   # note uid:gid, e.g. 100:100
-   chown -R 100:100 /mnt/user/appdata/pursuarr
-   ```
+3. The container runs as UID:GID `99:100` (`nobody:users`), matching Unraid's default `appdata` permissions out of the box.
 
 ## Build from source
 
@@ -38,6 +34,6 @@ docker run -d -p 8080:8080 -v pursuarr-data:/data pursuarr
 docker compose up -d --build
 ```
 
-Settings live in `/data/settings.php` (persistent volume). Change the port with `PURSUARR_PORT=8081 docker compose up -d`.
+Settings live in `/data/settings.php` (persistent volume), or can be provided statelessly via environment variables (`PROWLARR_URL`, `PROWLARR_API_KEY`, `PURSUARR_EXPANSION_GROUPS`, `PURSUARR_VERIFY_TLS`, `PURSUARR_DOWNLOAD_CLIENT_ID`). Change the port with `PURSUARR_PORT=8081 docker compose up -d`.
 
 **Note:** there is no login. Put Pursuarr behind a reverse proxy with auth or on a private network.
