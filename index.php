@@ -1619,8 +1619,7 @@ var state = {
   clientsLoaded: false,
   pendingIndexers: [],
   pendingCategory: '',
-  pendingClient: defaultClientId,
-  indexerSelectionSnapshot: ''
+  pendingClient: defaultClientId
 };
 var controller = null;
 
@@ -2207,7 +2206,6 @@ function loadIndexers(){
         indexersListEl.appendChild(row);
       }
       state.indexersLoaded = true;
-      state.indexerSelectionSnapshot = selectedIndexerIds().join(',');
       updateIndexersSummary();
     })
     .catch(function(){
@@ -2264,19 +2262,6 @@ function loadClients(){
     .catch(function(){});
 }
 
-ddIndexersEl.addEventListener('toggle', function(){
-  if (ddIndexersEl.open){
-    state.indexerSelectionSnapshot = selectedIndexerIds().join(',');
-  } else {
-    var currentSnap = selectedIndexerIds().join(',');
-    if (currentSnap !== state.indexerSelectionSnapshot){
-      state.indexerSelectionSnapshot = currentSnap;
-      syncUrlState();
-      if (currentQuery()) runSearch();
-    }
-  }
-});
-
 document.addEventListener('click', function(ev){
   if (ddIndexersEl.open && !ddIndexersEl.contains(ev.target)){
     ddIndexersEl.open = false;
@@ -2309,17 +2294,14 @@ qEl.addEventListener('keydown', function(ev){
 typeEl.addEventListener('change', function(){
   updateIdHint();
   syncUrlState();
-  if (currentQuery()) runSearch();
 });
 
 limitEl.addEventListener('change', function(){
   syncUrlState();
-  if (currentQuery()) runSearch();
 });
 
 categoryEl.addEventListener('change', function(){
   syncUrlState();
-  if (currentQuery()) runSearch();
 });
 
 clientEl.addEventListener('change', function(){
