@@ -5,7 +5,9 @@ A better search interface connecting directly to Prowlarr, working on top of its
 - Exclude from search: Prepend strings with "-" to exclude them from your search results. For example: Search for "S01 -S01E" to exclude single episodes from your results.
 - Expand search: Add related keywords to your search. For example: A search for "x265" might also search for "h265" and "HEVC".
 - Exact matches: Prowlarr sometimes returns fuzzy results. If you need an exact match, put your string into quotes. For example: "green" will return results for green, but not for greed.
-- Grab directly via Prowlarrs API (send to your download client).
+- Instant result filtering: Refine already-fetched results in real time (`term`, `-exclude`, `"exact"`, `-"exact"`) without waiting on another Prowlarr search.
+- Grab directly via Prowlarr's API (send to your default or chosen download client).
+- Shareable search URLs: Query, filters, and sort state stay in sync with the URL (`?q=...`) for bookmarking or use as a custom browser search engine.
 
 ## Technical
 - Nearly stateless: No database, only a single settings file containing the API key and base URL to Prowlarr and the expanded search keywords.

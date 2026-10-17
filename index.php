@@ -873,7 +873,7 @@ function pursuarr_main(): void
     $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     $settings = pursuarr_load_settings();
 
-    if ($settings === null && in_array($action, ['search', 'grab', 'indexers', 'categories'], true)) {
+    if ($settings === null && in_array($action, ['search', 'grab', 'indexers', 'categories', 'clients'], true)) {
         pursuarr_json(['ok' => false, 'error' => 'Pursuarr is not configured yet — open the app and complete setup.'], 503);
     }
 
@@ -901,6 +901,10 @@ function pursuarr_main(): void
 
         case 'categories':
             pursuarr_action_categories($settings ?? pursuarr_default_settings());
+            return;
+
+        case 'clients':
+            pursuarr_action_clients($settings ?? pursuarr_default_settings());
             return;
 
         case 'status':
@@ -1026,8 +1030,12 @@ function pursuarr_action_grab(array $settings): void
     }
 
     $payload = ['guid' => $guid, 'indexerId' => (int)$indexerId];
-    if ($settings['download_client_id'] !== null) {
-        $payload['downloadClientId'] = $settings['download_client_id'];
+    $clientId = $body['downloadClientId'] ?? null;
+    if ($clientId === null || $clientId === '') {
+        $clientId = $settings['download_client_id'];
+    }
+    if ($clientId !== null && $clientId !== '') {
+        $payload['downloadClientId'] = is_numeric($clientId) ? (int)$clientId : $clientId;
     }
 
     $res = pursuarr_request_json('POST', '/search', $settings, null, $payload);
@@ -1087,6 +1095,32 @@ function pursuarr_action_categories(array $settings): void
     pursuarr_json($out);
 }
 
+function pursuarr_fetch_clients(array $settings): array
+{
+    $res = pursuarr_request_json('GET', '/downloadclient', $settings, null, null, 15);
+    if (!$res['ok'] || !is_array($res['json'])) {
+        return [];
+    }
+    $out = [];
+    foreach ($res['json'] as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $out[] = [
+            'id' => $item['id'] ?? null,
+            'name' => (string)($item['name'] ?? ''),
+            'protocol' => (string)($item['protocol'] ?? ''),
+            'enable' => (bool)($item['enable'] ?? true),
+        ];
+    }
+    return $out;
+}
+
+function pursuarr_action_clients(array $settings): void
+{
+    pursuarr_json(pursuarr_fetch_clients($settings));
+}
+
 function pursuarr_action_status(array $settings): void
 {
     $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
@@ -1139,6 +1173,7 @@ function pursuarr_action_status(array $settings): void
         'url' => $settings['prowlarr_url'],
         'version' => (string)($json['version'] ?? ''),
         'instanceName' => (string)($json['instanceName'] ?? ''),
+        'clients' => pursuarr_fetch_clients($settings),
     ]);
 }
 
@@ -1189,6 +1224,7 @@ function pursuarr_render_settings(?array $settings, bool $isSetup, ?string $noti
     $heading = $isSetup ? 'Setup' : 'Settings';
     $submitLabel = $isSetup ? 'Save & connect' : 'Save settings';
     $groupsText = pursuarr_h(pursuarr_groups_to_text($s['expansion_groups']));
+    $selectedClient = $s['download_client_id'] === null ? '' : (string)$s['download_client_id'];
     ?>
 <!doctype html>
 <html lang="en">
@@ -1205,9 +1241,9 @@ h1{font-size:22px;margin:0 0 4px}
 .sub{color:var(--muted);margin:0 0 24px}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:22px}
 label{display:block;font-size:13px;color:var(--muted);margin:16px 0 6px}
-input[type=text],input[type=password],input[type=number],textarea{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
 textarea{min-height:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
-input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
 .row{display:flex;gap:14px;flex-wrap:wrap}
 .row>div{flex:1;min-width:180px}
 .check{display:flex;align-items:center;gap:8px;margin:18px 0 0;color:var(--text);font-size:14px}
@@ -1266,8 +1302,13 @@ a{color:var(--accent)}
       </div>
     </div>
 
-    <label for="download_client_id">Download client ID <span style="opacity:.7">(optional — sent on grab)</span></label>
-    <input type="text" id="download_client_id" name="download_client_id" value="<?= pursuarr_h($s['download_client_id'] === null ? '' : (string)$s['download_client_id']) ?>" placeholder="e.g. 1">
+    <label for="download_client_id">Default download client <span style="opacity:.7">(optional — sent on grab)</span></label>
+    <select id="download_client_id" name="download_client_id" data-selected="<?= pursuarr_h($selectedClient) ?>">
+      <option value="">Default (let Prowlarr decide)</option>
+      <?php if ($selectedClient !== ''): ?>
+        <option value="<?= pursuarr_h($selectedClient) ?>" selected>Client #<?= pursuarr_h($selectedClient) ?></option>
+      <?php endif; ?>
+    </select>
 
     <label class="check"><input type="checkbox" id="verify_tls" name="verify_tls" value="1" <?= $s['verify_tls'] ? 'checked' : '' ?>> Verify TLS certificates</label>
     <p class="hint">Uncheck for self-signed certificates.</p>
@@ -1288,6 +1329,48 @@ a{color:var(--accent)}
 (function(){
   var btn = document.getElementById('testBtn');
   var out = document.getElementById('testResult');
+  var clientSelect = document.getElementById('download_client_id');
+
+  function populateClients(list){
+    if (!Array.isArray(list)) return;
+    var current = clientSelect.value || clientSelect.getAttribute('data-selected') || '';
+    clientSelect.innerHTML = '';
+    var defOpt = document.createElement('option');
+    defOpt.value = '';
+    defOpt.textContent = 'Default (let Prowlarr decide)';
+    clientSelect.appendChild(defOpt);
+    var found = false;
+    for (var i = 0; i < list.length; i++){
+      var c = list[i];
+      if (!c || c.id === null || c.id === undefined) continue;
+      var opt = document.createElement('option');
+      opt.value = String(c.id);
+      var label = (c.name || ('Client #' + c.id));
+      if (c.protocol) label += ' (' + c.protocol + ')';
+      if (c.enable === false) label += ' [disabled]';
+      opt.textContent = label;
+      if (String(c.id) === current){
+        opt.selected = true;
+        found = true;
+      }
+      clientSelect.appendChild(opt);
+    }
+    if (current !== '' && !found){
+      var fallback = document.createElement('option');
+      fallback.value = current;
+      fallback.textContent = 'Client #' + current;
+      fallback.selected = true;
+      clientSelect.appendChild(fallback);
+    }
+  }
+
+  <?php if (!$isSetup): ?>
+  fetch('?action=clients')
+    .then(function(r){ return r.json(); })
+    .then(function(list){ populateClients(list); })
+    .catch(function(){});
+  <?php endif; ?>
+
   btn.addEventListener('click', function(){
     var payload = {
       url: document.getElementById('prowlarr_url').value.trim(),
@@ -1307,6 +1390,7 @@ a{color:var(--accent)}
         if (d.ok) {
           out.textContent = 'Connected' + (d.instanceName ? ' to ' + d.instanceName : '') + (d.version ? ' (Prowlarr ' + d.version + ')' : '') + '.';
           out.style.color = 'var(--ok)';
+          if (Array.isArray(d.clients)) populateClients(d.clients);
         } else {
           out.textContent = d.error || 'Connection failed.';
           out.style.color = 'var(--danger)';
@@ -1327,6 +1411,7 @@ function pursuarr_render_app(array $settings): void
         [
             'defaultLimit' => (int)$settings['default_limit'],
             'searchTimeout' => (int)$settings['search_timeout'],
+            'defaultClientId' => $settings['download_client_id'],
         ],
         JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
     );
@@ -1349,8 +1434,8 @@ main{max-width:1440px;margin:0 auto;padding:18px 20px 60px}
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
 .searchrow{display:flex;gap:10px;flex-wrap:wrap}
 #q{flex:1;min-width:260px;padding:12px 14px;font-size:16px;border-radius:10px;border:1px solid var(--border);background:#0f1115;color:var(--text)}
-#q:focus{outline:2px solid var(--accent);outline-offset:1px}
-select,input[type=number]{padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
+#q:focus,#filter:focus{outline:2px solid var(--accent);outline-offset:1px}
+select,input[type=number],#filter{padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#0f1115;color:var(--text);font:inherit}
 button{font:inherit;border-radius:10px;border:1px solid var(--border);padding:10px 16px;cursor:pointer;background:#232837;color:var(--text)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 button.ghost{background:transparent}
@@ -1364,15 +1449,20 @@ button:hover:not(:disabled){filter:brightness(1.12)}
 .chip{background:#232837;border:1px solid var(--border);border-radius:999px;padding:3px 11px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .errors{margin:12px 2px 0}
 .errors .err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger);border-radius:8px;padding:8px 12px;font-size:13px;margin-top:6px}
-.filters{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-top:14px}
+.filters{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:14px}
 .filters .fgroup{display:flex;flex-direction:column;gap:6px}
 .filters label{font-size:12px;color:var(--muted)}
 details.dd{position:relative}
 details.dd>summary{list-style:none;cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#0f1115;min-width:210px;user-select:none}
 details.dd>summary::-webkit-details-marker{display:none}
 details.dd[open]>summary{border-color:var(--accent)}
-.ddpanel{position:absolute;top:calc(100% + 6px);left:0;z-index:40;background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px;min-width:260px;max-height:320px;overflow:auto;box-shadow:0 12px 30px rgba(0,0,0,.45)}
-.ddpanel .row{display:flex;align-items:center;gap:8px;padding:5px 4px;font-size:13.5px}
+.ddpanel{position:absolute;top:calc(100% + 6px);left:0;z-index:40;background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px;min-width:280px;max-height:340px;overflow:auto;box-shadow:0 12px 30px rgba(0,0,0,.45)}
+.ddactions{display:flex;gap:6px;padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.ddactions button{padding:4px 9px;font-size:11.5px;border-radius:6px}
+.ddpanel .row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 4px;font-size:13.5px}
+.ddpanel .row label{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text);cursor:pointer;flex:1}
+.ddpanel .row.disabled{opacity:.5}
+.ddpanel .row.disabled label{cursor:default}
 .ddpanel .row input{width:15px;height:15px}
 .ddpanel .sub{padding-left:18px;color:var(--muted)}
 #limit{width:96px}
@@ -1454,8 +1544,16 @@ a{color:var(--accent)}
       <select id="category"><option value="">All categories</option></select>
     </div>
     <div class="fgroup">
+      <label for="client">Download client</label>
+      <select id="client"><option value="">Default client</option></select>
+    </div>
+    <div class="fgroup">
       <label for="limit">Limit</label>
       <input type="number" id="limit" min="1" max="1000" value="100">
+    </div>
+    <div class="fgroup" style="flex:1;min-width:220px">
+      <label for="filter">Filter fetched results</label>
+      <input type="text" id="filter" placeholder="Instant filter — e.g.  1080p  -720p  &quot;remux&quot;" autocomplete="off" spellcheck="false">
     </div>
   </section>
 
@@ -1497,16 +1595,32 @@ var errorsEl = document.getElementById('searchErrors');
 var idHintEl = document.getElementById('idhint');
 var limitEl = document.getElementById('limit');
 var categoryEl = document.getElementById('category');
+var clientEl = document.getElementById('client');
+var filterEl = document.getElementById('filter');
+var ddIndexersEl = document.getElementById('ddIndexers');
 var indexersListEl = document.getElementById('indexerList');
 var indexersSummaryEl = document.getElementById('indexersSummary');
 
-limitEl.value = String(window.PURSUARR.defaultLimit || 100);
+var defaultLimit = Number(window.PURSUARR.defaultLimit || 100);
+var defaultClientId = window.PURSUARR.defaultClientId !== null && window.PURSUARR.defaultClientId !== undefined
+  ? String(window.PURSUARR.defaultClientId)
+  : '';
+limitEl.value = String(defaultLimit);
 
 var state = {
   results: [],
+  filteredCount: 0,
+  variantErrorsCount: 0,
   sortKey: 'age',
   sortDir: 'asc',
-  searched: false
+  searched: false,
+  indexersLoaded: false,
+  categoriesLoaded: false,
+  clientsLoaded: false,
+  pendingIndexers: [],
+  pendingCategory: '',
+  pendingClient: defaultClientId,
+  indexerSelectionSnapshot: ''
 };
 var controller = null;
 
@@ -1575,10 +1689,120 @@ function categoryText(r){
   return names.filter(Boolean).join(', ') || '—';
 }
 
+function tokenizeFilter(query){
+  var tokens = [];
+  var len = query.length;
+  var i = 0;
+  while (i < len){
+    var c = query.charAt(i);
+    if (/\s/.test(c)){ i++; continue; }
+    var neg = false;
+    if (c === '-' && i + 1 < len && !/\s/.test(query.charAt(i + 1))){
+      neg = true;
+      i++;
+      c = query.charAt(i);
+    }
+    if (c === '"'){
+      i++;
+      var start = i;
+      while (i < len && query.charAt(i) !== '"') i++;
+      var text = query.slice(start, i);
+      if (i < len) i++;
+      if (text !== '') tokens.push({type: neg ? 'exact_exclude' : 'exact', text: text});
+      continue;
+    }
+    var tStart = i;
+    while (i < len && !/\s/.test(query.charAt(i))) i++;
+    var word = query.slice(tStart, i);
+    if (word !== '') tokens.push({type: neg ? 'exclude' : 'term', text: word});
+  }
+  return tokens;
+}
+
+function normalizeTitleTokens(s){
+  var norm = String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return norm === '' ? [] : norm.split(/\s+/);
+}
+
+function containsSequence(haystack, needle){
+  var n = needle.length, h = haystack.length;
+  if (n === 0) return true;
+  if (n > h) return false;
+  for (var i = 0; i <= h - n; i++){
+    var ok = true;
+    for (var j = 0; j < n; j++){
+      if (haystack[i + j] !== needle[j]){ ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+function applyClientFilter(results, filterStr){
+  var q = String(filterStr || '').trim();
+  if (!q) return results.slice();
+  var tokens = tokenizeFilter(q);
+  if (!tokens.length) return results.slice();
+  var terms = [], exclusions = [], exacts = [], exactExclusions = [];
+  for (var i = 0; i < tokens.length; i++){
+    var t = tokens[i];
+    if (t.type === 'term') terms.push(t.text.toLowerCase());
+    else if (t.type === 'exclude') exclusions.push(t.text.toLowerCase());
+    else if (t.type === 'exact'){
+      var ne = normalizeTitleTokens(t.text);
+      if (ne.length) exacts.push(ne);
+    } else if (t.type === 'exact_exclude'){
+      var nx = normalizeTitleTokens(t.text);
+      if (nx.length) exactExclusions.push(nx);
+    }
+  }
+  var out = [];
+  outer: for (var rIdx = 0; rIdx < results.length; rIdx++){
+    var r = results[rIdx];
+    var title = String(r.title || '');
+    var titleLower = title.toLowerCase();
+    var searchableLower = titleLower + ' ' + String(r.indexer || '').toLowerCase() + ' ' + categoryText(r).toLowerCase();
+    for (var ti = 0; ti < terms.length; ti++){
+      if (searchableLower.indexOf(terms[ti]) === -1) continue outer;
+    }
+    for (var ei = 0; ei < exclusions.length; ei++){
+      if (titleLower.indexOf(exclusions[ei]) !== -1) continue outer;
+    }
+    if (exacts.length || exactExclusions.length){
+      var titleTokens = normalizeTitleTokens(title);
+      for (var xi = 0; xi < exacts.length; xi++){
+        if (!containsSequence(titleTokens, exacts[xi])) continue outer;
+      }
+      for (var xxi = 0; xxi < exactExclusions.length; xxi++){
+        if (containsSequence(titleTokens, exactExclusions[xxi])) continue outer;
+      }
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+function updateMeta(){
+  if (!state.searched){
+    metaEl.textContent = '';
+    return;
+  }
+  var total = state.results.length;
+  var shown = state.filteredCount;
+  var hasFilter = filterEl.value.trim() !== '';
+  var text = hasFilter
+    ? ('Showing ' + shown + ' of ' + total + ' result' + (total === 1 ? '' : 's'))
+    : (total + ' result' + (total === 1 ? '' : 's'));
+  if (state.variantErrorsCount > 0){
+    text += ' · ' + state.variantErrorsCount + ' variant error' + (state.variantErrorsCount === 1 ? '' : 's');
+  }
+  metaEl.textContent = text;
+}
+
 function renderVariants(list){
   variantsEl.innerHTML = '';
   if (!list || !list.length) return;
-  variantsEl.appendChild(el('span', 'vlabel', list.length > 1 ? 'searched:' : 'searched:'));
+  variantsEl.appendChild(el('span', 'vlabel', 'searched:'));
   for (var i = 0; i < list.length; i++){
     variantsEl.appendChild(el('span', 'chip', list[i]));
   }
@@ -1608,7 +1832,8 @@ function sortValue(r, key){
 
 function renderRows(){
   rowsEl.innerHTML = '';
-  var arr = state.results.slice();
+  var arr = applyClientFilter(state.results, filterEl.value);
+  state.filteredCount = arr.length;
   arr.sort(function(a, b){
     var va = sortValue(a, state.sortKey), vb = sortValue(b, state.sortKey);
     var c = 0;
@@ -1620,77 +1845,82 @@ function renderRows(){
 
   if (!arr.length){
     var tr = el('tr');
-    var td = el('td', 'empty', state.searched ? 'No results.' : 'Search something to get started.');
+    var emptyMsg = 'Search something to get started.';
+    if (state.searched){
+      emptyMsg = (state.results.length > 0 && filterEl.value.trim() !== '')
+        ? 'No results match the instant filter.'
+        : 'No results.';
+    }
+    var td = el('td', 'empty', emptyMsg);
     td.colSpan = 9;
     tr.appendChild(td);
     rowsEl.appendChild(tr);
-    return;
-  }
+  } else {
+    for (var i = 0; i < arr.length; i++){
+      var r = arr[i];
+      var rowTr = el('tr');
 
-  for (var i = 0; i < arr.length; i++){
-    var r = arr[i];
-    var tr = el('tr');
+      var tdTitle = el('td', 'title');
+      var infoUrl = safeUrl(r.infoUrl);
+      if (infoUrl){
+        var a = el('a', null, String(r.title || '(untitled)'));
+        a.href = infoUrl;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        tdTitle.appendChild(a);
+      } else {
+        tdTitle.appendChild(el('span', null, String(r.title || '(untitled)')));
+      }
+      rowTr.appendChild(tdTitle);
 
-    var tdTitle = el('td', 'title');
-    var infoUrl = safeUrl(r.infoUrl);
-    if (infoUrl){
-      var a = el('a', null, String(r.title || '(untitled)'));
-      a.href = infoUrl;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      tdTitle.appendChild(a);
-    } else {
-      tdTitle.appendChild(el('span', null, String(r.title || '(untitled)')));
+      rowTr.appendChild(el('td', 'cat', categoryText(r)));
+      rowTr.appendChild(el('td', 'num', formatAge(r)));
+      rowTr.appendChild(el('td', 'num', formatSize(r.size)));
+
+      var seed = '—';
+      if (String(r.protocol || '').toLowerCase() === 'usenet'){
+        if (r.grabs !== undefined && r.grabs !== null) seed = String(r.grabs);
+      } else if (r.seeders !== undefined && r.seeders !== null){
+        seed = String(r.seeders);
+        if (r.leechers !== undefined && r.leechers !== null) seed += ' / ' + String(r.leechers);
+      }
+      rowTr.appendChild(el('td', 'num', seed));
+
+      rowTr.appendChild(el('td', null, String(r.indexer || '—')));
+
+      var tdProto = el('td');
+      var proto = String(r.protocol || '').toLowerCase();
+      var badge = el('span', 'badge ' + proto, proto || '?');
+      tdProto.appendChild(badge);
+      rowTr.appendChild(tdProto);
+
+      var tdLinks = el('td', 'links');
+      var commentUrl = safeUrl(r.commentUrl);
+      var magnetUrl = safeUrl(r.magnetUrl);
+      if (commentUrl){
+        var ac = el('a', null, 'comment');
+        ac.href = commentUrl; ac.target = '_blank'; ac.rel = 'noopener noreferrer';
+        tdLinks.appendChild(ac);
+      }
+      if (magnetUrl){
+        var am = el('a', null, 'magnet');
+        am.href = magnetUrl;
+        tdLinks.appendChild(am);
+      }
+      if (!commentUrl && !magnetUrl) tdLinks.appendChild(el('span', null, '—'));
+      rowTr.appendChild(tdLinks);
+
+      var tdGrab = el('td');
+      var grabBtn = el('button', 'primary', 'Grab');
+      grabBtn.type = 'button';
+      (function(row, btn){
+        btn.addEventListener('click', function(){ grab(row, btn); });
+      })(r, grabBtn);
+      tdGrab.appendChild(grabBtn);
+      rowTr.appendChild(tdGrab);
+
+      rowsEl.appendChild(rowTr);
     }
-    tr.appendChild(tdTitle);
-
-    tr.appendChild(el('td', 'cat', categoryText(r)));
-    tr.appendChild(el('td', 'num', formatAge(r)));
-    tr.appendChild(el('td', 'num', formatSize(r.size)));
-
-    var seed = '—';
-    if (String(r.protocol || '').toLowerCase() === 'usenet'){
-      if (r.grabs !== undefined && r.grabs !== null) seed = String(r.grabs);
-    } else if (r.seeders !== undefined && r.seeders !== null){
-      seed = String(r.seeders);
-      if (r.leechers !== undefined && r.leechers !== null) seed += ' / ' + String(r.leechers);
-    }
-    tr.appendChild(el('td', 'num', seed));
-
-    tr.appendChild(el('td', null, String(r.indexer || '—')));
-
-    var tdProto = el('td');
-    var proto = String(r.protocol || '').toLowerCase();
-    var badge = el('span', 'badge ' + proto, proto || '?');
-    tdProto.appendChild(badge);
-    tr.appendChild(tdProto);
-
-    var tdLinks = el('td', 'links');
-    var commentUrl = safeUrl(r.commentUrl);
-    var magnetUrl = safeUrl(r.magnetUrl);
-    if (commentUrl){
-      var ac = el('a', null, 'comment');
-      ac.href = commentUrl; ac.target = '_blank'; ac.rel = 'noopener noreferrer';
-      tdLinks.appendChild(ac);
-    }
-    if (magnetUrl){
-      var am = el('a', null, 'magnet');
-      am.href = magnetUrl;
-      tdLinks.appendChild(am);
-    }
-    if (!commentUrl && !magnetUrl) tdLinks.appendChild(el('span', null, '—'));
-    tr.appendChild(tdLinks);
-
-    var tdGrab = el('td');
-    var grabBtn = el('button', 'primary', 'Grab');
-    grabBtn.type = 'button';
-    (function(row, btn){
-      btn.addEventListener('click', function(){ grab(row, btn); });
-    })(r, grabBtn);
-    tdGrab.appendChild(grabBtn);
-    tr.appendChild(tdGrab);
-
-    rowsEl.appendChild(tr);
   }
 
   var heads = document.querySelectorAll('th.sortable');
@@ -1722,15 +1952,94 @@ function updateIdHint(){
 
 function currentQuery(){ return qEl.value.trim(); }
 
+function selectedIndexerIds(){
+  if (!state.indexersLoaded) return state.pendingIndexers.slice();
+  var boxes = indexersListEl.querySelectorAll('input[type=checkbox][data-id]');
+  var ids = [];
+  for (var i = 0; i < boxes.length; i++){
+    if (boxes[i].checked) ids.push(boxes[i].getAttribute('data-id'));
+  }
+  return ids;
+}
+
+function selectedCategory(){
+  return state.categoriesLoaded ? categoryEl.value : (categoryEl.value || state.pendingCategory);
+}
+
+function selectedClient(){
+  return state.clientsLoaded ? clientEl.value : (clientEl.value || state.pendingClient);
+}
+
+function syncUrlState(){
+  if (!window.history || !window.history.replaceState) return;
+  var params = new URLSearchParams();
+  var q = currentQuery();
+  if (q) params.set('q', q);
+  if (typeEl.value && typeEl.value !== 'search') params.set('type', typeEl.value);
+  var cat = selectedCategory();
+  if (cat) params.set('category', cat);
+  var ids = selectedIndexerIds();
+  if (ids.length) params.set('indexers', ids.join(','));
+  var lim = String(limitEl.value || defaultLimit);
+  if (lim !== String(defaultLimit)) params.set('limit', lim);
+  var cli = selectedClient();
+  if (cli !== defaultClientId) params.set('client', cli);
+  var flt = filterEl.value.trim();
+  if (flt) params.set('filter', flt);
+  if (state.sortKey !== 'age' || state.sortDir !== 'asc'){
+    params.set('sort', state.sortKey);
+    params.set('dir', state.sortDir);
+  }
+  var qs = params.toString();
+  var newUrl = window.location.pathname + (qs ? '?' + qs : '');
+  window.history.replaceState(null, '', newUrl);
+}
+
+function restoreFromUrl(){
+  var params = new URLSearchParams(window.location.search);
+  var q = params.get('q') !== null ? params.get('q') : params.get('query');
+  if (q !== null) qEl.value = q;
+  var t = params.get('type');
+  if (t && ['search', 'tvsearch', 'movie', 'music', 'book'].indexOf(t.toLowerCase()) !== -1){
+    typeEl.value = t.toLowerCase();
+  }
+  var lim = params.get('limit');
+  if (lim && !isNaN(Number(lim)) && Number(lim) >= 1){
+    limitEl.value = String(Math.min(1000, Math.max(1, Math.floor(Number(lim)))));
+  }
+  var flt = params.get('filter');
+  if (flt !== null) filterEl.value = flt;
+  var sort = params.get('sort');
+  if (sort && ['title', 'age', 'size', 'seeders', 'indexer'].indexOf(sort) !== -1){
+    state.sortKey = sort;
+  }
+  var dir = params.get('dir');
+  if (dir === 'asc' || dir === 'desc'){
+    state.sortDir = dir;
+  }
+  var cat = params.get('category') !== null ? params.get('category') : params.get('categories');
+  if (cat !== null) state.pendingCategory = cat;
+  var idxParam = params.get('indexers') !== null ? params.get('indexers') : params.get('indexerIds');
+  if (idxParam){
+    state.pendingIndexers = idxParam.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+  if (params.has('client')){
+    state.pendingClient = params.get('client') || '';
+  }
+  updateIdHint();
+}
+
 function runSearch(){
   var query = currentQuery();
+  syncUrlState();
   if (!query){
     state.results = [];
+    state.variantErrorsCount = 0;
     state.searched = false;
     renderRows();
     renderVariants([]);
     renderErrors([]);
-    metaEl.textContent = '';
+    updateMeta();
     return;
   }
   if (controller) controller.abort();
@@ -1743,26 +2052,28 @@ function runSearch(){
   params.set('action', 'search');
   params.set('query', query);
   params.set('type', typeEl.value);
-  params.set('limit', String(limitEl.value || window.PURSUARR.defaultLimit));
+  params.set('limit', String(limitEl.value || defaultLimit));
   var ids = selectedIndexerIds();
   if (ids.length) params.set('indexerIds', ids.join(','));
-  if (categoryEl.value) params.set('categories', categoryEl.value);
+  var cat = selectedCategory();
+  if (cat) params.set('categories', cat);
 
   fetch('?' + params.toString(), {signal: signal})
     .then(function(res){ return res.json(); })
     .then(function(data){
       if (signal.aborted) return;
       state.results = Array.isArray(data.results) ? data.results : [];
+      state.variantErrorsCount = Array.isArray(data.errors) ? data.errors.length : 0;
       state.searched = true;
       renderVariants(data.variantsUsed || []);
       renderErrors(data.errors || []);
       renderRows();
-      metaEl.textContent = state.results.length + ' result' + (state.results.length === 1 ? '' : 's')
-        + (data.errors && data.errors.length ? ' · ' + data.errors.length + ' variant error' + (data.errors.length === 1 ? '' : 's') : '');
+      updateMeta();
     })
     .catch(function(err){
       if (err && err.name === 'AbortError') return;
       state.results = [];
+      state.variantErrorsCount = 0;
       state.searched = true;
       renderRows();
       renderErrors([{variant: '', error: 'Request failed: ' + (err && err.message ? err.message : 'network error')}]);
@@ -1780,11 +2091,16 @@ function grab(row, btn){
     toast('This result has no grab information.', 'err');
     return;
   }
+  var payload = {guid: guid, indexerId: indexerId};
+  var cli = selectedClient();
+  if (cli !== ''){
+    payload.downloadClientId = isNaN(Number(cli)) ? cli : Number(cli);
+  }
   btn.disabled = true;
   fetch('?action=grab', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({guid: guid, indexerId: indexerId})
+    body: JSON.stringify(payload)
   })
     .then(function(res){ return res.json(); })
     .then(function(data){
@@ -1802,21 +2118,35 @@ function grab(row, btn){
     });
 }
 
-function selectedIndexerIds(){
-  var boxes = indexersListEl.querySelectorAll('input[type=checkbox][data-id]');
-  var ids = [];
-  for (var i = 0; i < boxes.length; i++){
-    if (boxes[i].checked) ids.push(boxes[i].getAttribute('data-id'));
-  }
-  return ids;
-}
-
 function updateIndexersSummary(){
+  if (!state.indexersLoaded){
+    var n = state.pendingIndexers.length;
+    indexersSummaryEl.textContent = n === 0 ? 'All indexers' : n + ' indexer' + (n === 1 ? '' : 's') + ' selected';
+    return;
+  }
   var boxes = indexersListEl.querySelectorAll('input[type=checkbox][data-id]');
   var checked = 0;
   for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) checked++;
   indexersSummaryEl.textContent = checked === 0 ? 'All indexers'
     : checked + ' indexer' + (checked === 1 ? '' : 's') + ' selected';
+}
+
+function selectIndexersByMode(mode){
+  var boxes = indexersListEl.querySelectorAll('input[type=checkbox][data-id]');
+  for (var i = 0; i < boxes.length; i++){
+    var cb = boxes[i];
+    if (cb.disabled){
+      cb.checked = false;
+      continue;
+    }
+    var proto = (cb.getAttribute('data-proto') || '').toLowerCase();
+    if (mode === 'all') cb.checked = true;
+    else if (mode === 'none') cb.checked = false;
+    else if (mode === 'torrent') cb.checked = (proto === 'torrent');
+    else if (mode === 'usenet') cb.checked = (proto === 'usenet');
+  }
+  updateIndexersSummary();
+  syncUrlState();
 }
 
 function loadIndexers(){
@@ -1832,20 +2162,53 @@ function loadIndexers(){
         indexersListEl.appendChild(el('div', 'row', 'No indexers configured in Prowlarr.'));
         return;
       }
+
+      var actions = el('div', 'ddactions');
+      var modes = [
+        {label: 'All', mode: 'all'},
+        {label: 'None', mode: 'none'},
+        {label: 'Torrents', mode: 'torrent'},
+        {label: 'Usenet', mode: 'usenet'}
+      ];
+      for (var m = 0; m < modes.length; m++){
+        (function(item){
+          var b = el('button', null, item.label);
+          b.type = 'button';
+          b.addEventListener('click', function(){ selectIndexersByMode(item.mode); });
+          actions.appendChild(b);
+        })(modes[m]);
+      }
+      indexersListEl.appendChild(actions);
+
       for (var i = 0; i < data.length; i++){
         var idx = data[i];
-        var row = el('div', 'row');
+        var enabled = idx.enable !== false;
+        var proto = String(idx.protocol || '').toLowerCase();
+        var row = el('div', 'row' + (enabled ? '' : ' disabled'));
         var cb = el('input');
         cb.type = 'checkbox';
+        cb.disabled = !enabled;
         cb.setAttribute('data-id', String(idx.id));
-        cb.addEventListener('change', function(){ updateIndexersSummary(); });
+        cb.setAttribute('data-proto', proto);
+        if (enabled && state.pendingIndexers.indexOf(String(idx.id)) !== -1){
+          cb.checked = true;
+        }
+        cb.addEventListener('change', function(){
+          updateIndexersSummary();
+          syncUrlState();
+        });
         var lab = el('label');
-        lab.style.cursor = 'pointer';
         lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(' ' + (idx.name || '#' + idx.id) + (idx.enable ? '' : ' (disabled)')));
+        lab.appendChild(document.createTextNode(' ' + (idx.name || '#' + idx.id) + (enabled ? '' : ' (disabled)')));
         row.appendChild(lab);
+        if (proto){
+          row.appendChild(el('span', 'badge ' + proto, proto));
+        }
         indexersListEl.appendChild(row);
       }
+      state.indexersLoaded = true;
+      state.indexerSelectionSnapshot = selectedIndexerIds().join(',');
+      updateIndexersSummary();
     })
     .catch(function(){
       indexersListEl.innerHTML = '';
@@ -1871,9 +2234,60 @@ function loadCategories(){
           categoryEl.appendChild(so);
         }
       }
+      state.categoriesLoaded = true;
+      if (state.pendingCategory){
+        categoryEl.value = state.pendingCategory;
+      }
     })
     .catch(function(){});
 }
+
+function loadClients(){
+  fetch('?action=clients')
+    .then(function(res){ return res.json(); })
+    .then(function(data){
+      if (!Array.isArray(data)) return;
+      for (var i = 0; i < data.length; i++){
+        var c = data[i];
+        if (!c || c.id === null || c.id === undefined || c.enable === false) continue;
+        var label = c.name || ('Client #' + c.id);
+        if (c.protocol) label += ' (' + c.protocol + ')';
+        var o = el('option', null, label);
+        o.value = String(c.id);
+        clientEl.appendChild(o);
+      }
+      state.clientsLoaded = true;
+      if (state.pendingClient !== ''){
+        clientEl.value = state.pendingClient;
+      }
+    })
+    .catch(function(){});
+}
+
+ddIndexersEl.addEventListener('toggle', function(){
+  if (ddIndexersEl.open){
+    state.indexerSelectionSnapshot = selectedIndexerIds().join(',');
+  } else {
+    var currentSnap = selectedIndexerIds().join(',');
+    if (currentSnap !== state.indexerSelectionSnapshot){
+      state.indexerSelectionSnapshot = currentSnap;
+      syncUrlState();
+      if (currentQuery()) runSearch();
+    }
+  }
+});
+
+document.addEventListener('click', function(ev){
+  if (ddIndexersEl.open && !ddIndexersEl.contains(ev.target)){
+    ddIndexersEl.open = false;
+  }
+});
+
+document.addEventListener('keydown', function(ev){
+  if (ev.key === 'Escape' && ddIndexersEl.open){
+    ddIndexersEl.open = false;
+  }
+});
 
 goBtn.addEventListener('click', function(){
   runSearch();
@@ -1892,13 +2306,30 @@ qEl.addEventListener('keydown', function(ev){
   }
 });
 
-typeEl.addEventListener('change', updateIdHint);
-
-limitEl.addEventListener('change', function(){
+typeEl.addEventListener('change', function(){
+  updateIdHint();
+  syncUrlState();
   if (currentQuery()) runSearch();
 });
-categoryEl.addEventListener('change', function(){
+
+limitEl.addEventListener('change', function(){
+  syncUrlState();
   if (currentQuery()) runSearch();
+});
+
+categoryEl.addEventListener('change', function(){
+  syncUrlState();
+  if (currentQuery()) runSearch();
+});
+
+clientEl.addEventListener('change', function(){
+  syncUrlState();
+});
+
+filterEl.addEventListener('input', function(){
+  renderRows();
+  updateMeta();
+  syncUrlState();
 });
 
 var heads = document.querySelectorAll('th.sortable');
@@ -1913,14 +2344,22 @@ for (var h = 0; h < heads.length; h++){
         state.sortDir = 'asc';
       }
       renderRows();
+      syncUrlState();
     });
   })(heads[h]);
 }
 
+restoreFromUrl();
+updateIndexersSummary();
 loadIndexers();
 loadCategories();
+loadClients();
 renderRows();
-qEl.focus();
+if (currentQuery()){
+  runSearch();
+} else {
+  qEl.focus();
+}
 })();
 </script>
 </body>
